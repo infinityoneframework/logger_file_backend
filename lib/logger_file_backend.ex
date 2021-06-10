@@ -103,8 +103,8 @@ defmodule LoggerFileBackend do
 
     case :file.read_file_info(path, [:raw]) do
       {:ok, file_info(size: size)} ->
-
         if size >= max_bytes, do:  rename_file(path, keep) , else: true
+
       _ ->
         true
     end
