@@ -1,150 +1,126 @@
-LoggerFileBackend
-=================
+# LoggerFileBackend
 
-A simple `Logger` backend which writes logs to a file. It does not handle log
-rotation for you, but it does tolerate log file renames, so it can be
-used in conjunction with external log rotation.
+A `LoggerBackends` backend that writes logs to files, filters metadata, and
+optionally rotates files by size. It also reopens a log after an external rename.
+Rename detection relies on Unix inodes and is not supported on Windows.
 
-**Note** The following of file renames does not work on Windows, because `File.Stat.inode` is used to determine whether the log file has been (re)moved and, on non-Unix, `File.Stat.inode` is always 0.
+## Elixir 1.20 setup
 
-**Note** If you are running this with the Phoenix framework, please review the Phoenix specific instructions later on in this file.
+This fork targets Elixir 1.20 and Erlang/OTP 29. The `.tool-versions` file selects
+Elixir 1.20.4 and Erlang 29.1.2.
 
-## Configuration
+Elixir's `Logger.add_backend/2`, `Logger.configure_backend/2`, and
+`config :logger, backends: ...` are deprecated. This project depends on
+[`logger_backends`](https://hexdocs.pm/logger_backends/LoggerBackends.html)
+to retain the existing backend protocol and configuration options.
 
-`LoggerFileBackend` is a custom backend for the elixir `:logger` application. As
-such, it relies on the `:logger` application to start the relevant processes.
-However, unlike the default `:console` backend, we may want to configure
-multiple log files, each with different log levels formats, etc. Also, we want
-`:logger` to be responsible for starting and stopping each of our logging
-processes for us. Because of these considerations, there must be one `:logger`
-backend configured for each log file we need. Each backend has a name like
-`{LoggerFileBackend, id}`, where `id` is any elixir term (usually an atom).
+Add this fork to your application's dependencies. Mix automatically starts its
+runtime dependencies, including `:logger_backends`.
 
-For example, let's say we want to log error messages to
-"/var/log/my_app/error.log". To do that, we will need to configure a backend.
-Let's call it `{LoggerFileBackend, :error_log}`.
-
-Our config.exs would have an entry similar to this:
+Configure each named file in `config/config.exs`:
 
 ```elixir
-# tell logger to load a LoggerFileBackend processes
-config :logger,
-  backends: [{LoggerFileBackend, :error_log}]
-```
+import Config
 
-With this configuration, the `:logger` application will start one `LoggerFileBackend`
-named `{LoggerFileBackend, :error_log}`. We still need to set the correct file
-path and log levels for the backend, though. To do that, we add another config
-stanza. Together with the stanza above, we'll have something like this:
-
-```elixir
-# tell logger to load a LoggerFileBackend processes
-config :logger,
-  backends: [{LoggerFileBackend, :error_log}]
-
-# configuration for the {LoggerFileBackend, :error_log} backend
 config :logger, :error_log,
   path: "/var/log/my_app/error.log",
-  level: :error
+  level: :error,
+  format: "$time $metadata[$level] $message\n",
+  metadata: [:request_id],
+  rotate: %{max_bytes: 10_000_000, keep: 5}
 ```
 
-Check out the examples below for runtime configuration and configuration for
-multiple log files.
-
-`LoggerFileBackend` supports the following configuration values:
-
-* path - the path to the log file
-* level - the logging level for the backend
-* format - the logging format for the backend
-* metadata - the metadata to include
-* metadata_filter - metadata terms which must be present in order to log
-
-
-### Examples
-
-#### Runtime configuration
+Register the backend in your application's `start/2` callback, after the Logger
+and LoggerBackends applications have started, before starting children that log:
 
 ```elixir
-Logger.add_backend {LoggerFileBackend, :debug}
-Logger.configure_backend {LoggerFileBackend, :debug},
-  path: "/path/to/debug.log",
-  format: ...,
-  metadata: ...,
-  metadata_filter: ...
+{:ok, _pid} = LoggerBackends.add({LoggerFileBackend, :error_log})
 ```
 
-#### Application config for multiple log files
+Do not call this from a configuration file. The `:logger_backends` application
+must be running first. Remove the old `config :logger, backends: ...` registration
+when migrating so the backend is not installed twice. Register each file once.
+
+The default console handler remains independently configurable:
 
 ```elixir
-config :logger,
-  backends: [{LoggerFileBackend, :info},
-             {LoggerFileBackend, :error}]
-
-config :logger, :info,
-  path: "/path/to/info.log",
-  level: :info
-
-config :logger, :error,
-  path: "/path/to/error.log",
-  level: :error
-```
-#### Filtering specific metadata terms
-
-This example only logs `:info` statements originating from the `:ui` OTP app; the `:application` metadata key is auto-populated by `Logger`.
-
-```elixir
-config :logger,
-  backends: [{LoggerFileBackend, :ui}]
-
-config :logger, :ui,
-  path: "/path/to/ui.log",
-  level: :info,
-  metadata_filter: [application: :ui]
+config :logger, level: :debug
+config :logger, :default_formatter,
+  format: "$time $metadata[$level] $message\n",
+  metadata: [:request_id]
 ```
 
-This example only writes log statements with a custom metadata key to the file.
+The global Logger level also filters messages before they reach this backend.
+For example, a backend at `:debug` cannot receive debug messages if the global
+level is `:info`. Set `config :logger, default_handler: false` when you want to
+turn off the default console handler.
+
+## Options
+
+- `:path` — destination file; `nil` disables file output and closes the file.
+- `:level` — minimum level; `nil` accepts every level delivered to the backend.
+- `:format` — Logger format string or `{module, function}` formatter; defaults to
+  `"$time $metadata[$level] $message\n"`.
+- `:metadata` — ordered metadata keys to display, or `:all`; defaults to `[]`.
+- `:metadata_filter` — required metadata key/value pairs; defaults to no filter.
+- `:rotate` — `%{max_bytes: positive_integer, keep: positive_integer}`, or `nil`.
+  Before writing a message, a file at or above `max_bytes` is renamed to `.1`;
+  older archives move up to `.keep`. A message may take the file above the limit.
+
+Backend formatting stays in the named backend configuration. The
+`:default_formatter` configuration applies to the default handler, not this file.
+The compatibility bridge preserves legacy event levels: warning is formatted as
+`warn`, notice as `info`, and critical/alert/emergency as `error`.
+
+## Runtime configuration
 
 ```elixir
-# in a config file:
-config :logger,
-  backends: [{LoggerFileBackend, :device_1}]
+{:ok, _pid} = LoggerBackends.add({LoggerFileBackend, :debug_log})
 
-config :logger, :device_1,
-  path: "/path/to/device_1.log",
+:ok = LoggerBackends.configure({LoggerFileBackend, :debug_log},
+  path: "/var/log/my_app/debug.log",
   level: :debug,
+  metadata: [:user_id],
   metadata_filter: [device: 1]
+)
 
-# Usage:
-# anywhere in the code:
-Logger.info("statement", device: 1)
+Logger.info("device connected", device: 1, user_id: 42)
+Logger.flush()
 
-# or, for a single process, e.g., a GenServer:
-# in init/1:
-Logger.metadata(device: 1)
-# ^ sets device: 1 for all subsequent log statements from this process.
-
-# Later, in other code (handle_cast/2, etc.)
-Logger.info("statement") # <= already tagged with the device_1 metadata
+:ok = LoggerBackends.remove({LoggerFileBackend, :debug_log}, flush: true)
 ```
 
+Changing the path closes the old file immediately. Removing the backend closes
+its file. Backend settings remain under `Application.get_env(:logger, name)` so
+an explicitly re-added backend uses its last configuration.
 
-## Additional Phoenix Configurations
+## Multiple files
 
-Phoenix makes use of its own `mix.exs` file to track dependencies and additional applications. Add the following to your `mix.exs`:
+Use separate names and register both backends during application startup:
 
+```elixir
+config :logger, :info_log, path: "/var/log/my_app/info.log", level: :info
+config :logger, :error_log, path: "/var/log/my_app/error.log", level: :error
 ```
-def application do
-    [applications: [
-      ...,
-      :logger_file_backend,
-      ...
-      ]
-    ]
-end
-  
-defp deps do
-  [ ...
-    {:logger_file_backend, "~> 0.0.10"},
-  ]
-end
+
+```elixir
+{:ok, _pid} = LoggerBackends.add({LoggerFileBackend, :info_log})
+{:ok, _pid} = LoggerBackends.add({LoggerFileBackend, :error_log})
 ```
+
+An error reaches both files because `:level` is a minimum threshold.
+
+## Development
+
+Run `mix deps.get`, `mix test --warnings-as-errors`, and `mix test --cover`.
+Tests use isolated temporary directories and flush Logger before assertions.
+File-descriptor checks use `lsof` and require a Unix environment, matching the
+supported external-rotation platform.
+
+Development config defines `:dev_backend` options. Register it explicitly with
+`LoggerBackends.add({LoggerFileBackend, :dev_backend})` in `iex -S mix` to try it.
+Generate documentation with `mix docs --warnings-as-errors`.
+
+## License
+
+Copyright Kurt Williams. Distributed under the MIT license; see [LICENSE](LICENSE).

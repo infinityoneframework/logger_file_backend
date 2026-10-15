@@ -1,7 +1,3 @@
-use Mix.Config
+import Config
 
-config :logger, backends: []
-
-# config :logger, :test,
-#   level: :debug,
-#   path: "test/logs/error.log"
+config :logger, level: :debug, default_handler: false

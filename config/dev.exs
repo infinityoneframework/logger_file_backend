@@ -1,9 +1,6 @@
-use Mix.Config
+import Config
 
-config :logger,
-  backends: [{LoggerFileBackend, :dev_backend}],
-  level: :info,
-  format: "$time $metadata[$level] $message\n"
+config :logger, level: :info
 
 config :logger, :dev_backend,
   level: :error,
